@@ -1,6 +1,6 @@
 """
-WhatsApp + Claude Integration
-Receives WhatsApp messages via Twilio webhook and responds using Claude API
+WhatsApp + Claude + MCP Integration
+Receives WhatsApp messages via Twilio webhook and responds using Claude API with MCP tools
 """
 
 import os
@@ -11,12 +11,16 @@ from twilio.rest import Client
 import anthropic
 from typing import Optional
 import logging
+import asyncio
+
+# Import MCP client
+from mcp_client import mcp_client
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="WhatsApp Claude Bot")
+app = FastAPI(title="WhatsApp Claude MCP Bot")
 
 # Initialize clients
 twilio_client = Client(
@@ -32,13 +36,23 @@ claude_client = anthropic.Anthropic(
 conversation_history = {}
 
 
+@app.on_event("startup")
+async def startup_event():
+    """Initialize MCP client on startup"""
+    logger.info("Starting up WhatsApp Claude MCP Bot...")
+    await mcp_client.initialize()
+    logger.info("MCP client initialized successfully")
+
+
 @app.get("/")
 async def root():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "service": "WhatsApp Claude Bot",
-        "version": "1.0.0"
+        "service": "WhatsApp Claude MCP Bot",
+        "version": "2.0.0",
+        "mcp_enabled": len(mcp_client.available_tools) > 0,
+        "available_tools": len(mcp_client.available_tools)
     }
 
 
@@ -78,16 +92,31 @@ async def whatsapp_webhook(
         if len(conversation_history[user_id]) > 10:
             conversation_history[user_id] = conversation_history[user_id][-10:]
 
-        # Get Claude's response
-        logger.info("Calling Claude API...")
-        response = claude_client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=1024,
-            system="You are a helpful assistant responding to WhatsApp messages. Keep responses concise and friendly.",
-            messages=conversation_history[user_id]
+        # Get Claude's response with MCP tools
+        logger.info("Calling Claude API with MCP tools...")
+
+        system_prompt = """You are Saad's personal AI assistant via WhatsApp.
+
+You have access to Saad's Todoist tasks and can help manage them:
+- List tasks with todoist_get_tasks
+- Create new tasks with todoist_create_task
+- Complete tasks with todoist_complete_task
+
+About Saad:
+- Developer working on AI and automation projects
+- Located in UK
+- Prefers concise, direct responses
+
+Keep responses friendly but brief since this is WhatsApp.
+When showing tasks, format them clearly and concisely.
+Always confirm after creating or completing tasks."""
+
+        assistant_message = await mcp_client.chat_with_tools(
+            messages=conversation_history[user_id],
+            system_prompt=system_prompt,
+            max_turns=5
         )
 
-        assistant_message = response.content[0].text
         logger.info(f"Claude response: {assistant_message}")
 
         # Add assistant response to history
