@@ -973,6 +973,46 @@ class MCPClient:
                     },
                     "required": ["query"]
                 }
+            },
+            {
+                "name": "fetch_webpage",
+                "description": "Fetch and read the full text content from any URL. Fast and lightweight - use for static websites, articles, documentation. Returns the main content as clean text.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "Full URL to fetch (e.g., 'https://example.com/article')"
+                        },
+                        "extract_links": {
+                            "type": "boolean",
+                            "description": "Also extract all links from the page (default: false)"
+                        }
+                    },
+                    "required": ["url"]
+                }
+            },
+            {
+                "name": "fetch_webpage_browser",
+                "description": "Fetch webpage using full browser automation (Playwright). Use for JavaScript-heavy sites, dynamic content, sites requiring cookies/sessions. Slower but handles complex sites.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "Full URL to fetch (e.g., 'https://example.com/app')"
+                        },
+                        "wait_seconds": {
+                            "type": "integer",
+                            "description": "Seconds to wait for dynamic content to load (default: 3)"
+                        },
+                        "screenshot": {
+                            "type": "boolean",
+                            "description": "Take a screenshot of the page (default: false)"
+                        }
+                    },
+                    "required": ["url"]
+                }
             }
         ]
 
@@ -1113,6 +1153,10 @@ class MCPClient:
             # Web search tools
             elif tool_name == "google_web_search":
                 return await self._google_web_search(tool_input)
+            elif tool_name == "fetch_webpage":
+                return await self._fetch_webpage(tool_input)
+            elif tool_name == "fetch_webpage_browser":
+                return await self._fetch_webpage_browser(tool_input)
 
             else:
                 return {"error": f"Unknown tool: {tool_name}"}
@@ -3126,6 +3170,132 @@ class MCPClient:
                 else:
                     error_text = await response.text()
                     return {"success": False, "error": f"Custom Search API error: {response.status} - {error_text}"}
+
+    async def _fetch_webpage(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Fetch webpage content using aiohttp + BeautifulSoup (fast, static content)"""
+        import aiohttp
+        from bs4 import BeautifulSoup
+
+        url = params["url"]
+        extract_links = params.get("extract_links", False)
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; WhatsApp-Claude-Bot/1.0)"},
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status != 200:
+                        return {
+                            "success": False,
+                            "error": f"HTTP {response.status}: {response.reason}"
+                        }
+
+                    html_content = await response.text()
+                    soup = BeautifulSoup(html_content, 'html.parser')
+
+                    # Remove script, style, and other non-content tags
+                    for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
+                        tag.decompose()
+
+                    # Extract main text content
+                    text_content = soup.get_text(separator='\n', strip=True)
+
+                    # Clean up whitespace
+                    lines = [line.strip() for line in text_content.split('\n') if line.strip()]
+                    clean_text = '\n'.join(lines)
+
+                    result = {
+                        "success": True,
+                        "url": url,
+                        "title": soup.title.string if soup.title else "No title",
+                        "content": clean_text[:15000],  # Limit to 15k chars
+                        "content_length": len(clean_text),
+                        "truncated": len(clean_text) > 15000
+                    }
+
+                    # Extract links if requested
+                    if extract_links:
+                        links = []
+                        for a_tag in soup.find_all('a', href=True):
+                            href = a_tag['href']
+                            text = a_tag.get_text(strip=True)
+                            if href.startswith('http'):  # Only absolute URLs
+                                links.append({"url": href, "text": text})
+                        result["links"] = links[:100]  # Limit to 100 links
+
+                    return result
+
+        except aiohttp.ClientError as e:
+            return {"success": False, "error": f"Network error: {str(e)}"}
+        except Exception as e:
+            return {"success": False, "error": f"Failed to fetch webpage: {str(e)}"}
+
+    async def _fetch_webpage_browser(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Fetch webpage using Playwright browser automation (handles JavaScript)"""
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            return {
+                "success": False,
+                "error": "Playwright not installed. Use fetch_webpage for static sites."
+            }
+
+        url = params["url"]
+        wait_seconds = params.get("wait_seconds", 3)
+        take_screenshot = params.get("screenshot", False)
+
+        try:
+            async with async_playwright() as p:
+                # Launch browser in headless mode
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page(
+                    user_agent="Mozilla/5.0 (compatible; WhatsApp-Claude-Bot/1.0)"
+                )
+
+                # Navigate to URL
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+                # Wait for dynamic content to load
+                if wait_seconds > 0:
+                    await page.wait_for_timeout(wait_seconds * 1000)
+
+                # Extract text content
+                text_content = await page.evaluate("""
+                    () => {
+                        // Remove unwanted elements
+                        const unwanted = document.querySelectorAll('script, style, nav, footer, header, aside');
+                        unwanted.forEach(el => el.remove());
+
+                        // Get all visible text
+                        return document.body.innerText;
+                    }
+                """)
+
+                # Get page title
+                title = await page.title()
+
+                result = {
+                    "success": True,
+                    "url": url,
+                    "title": title,
+                    "content": text_content[:15000],  # Limit to 15k chars
+                    "content_length": len(text_content),
+                    "truncated": len(text_content) > 15000
+                }
+
+                # Take screenshot if requested
+                if take_screenshot:
+                    screenshot_data = await page.screenshot(type="png", full_page=False)
+                    import base64
+                    result["screenshot_base64"] = base64.b64encode(screenshot_data).decode('utf-8')
+
+                await browser.close()
+                return result
+
+        except Exception as e:
+            return {"success": False, "error": f"Browser automation failed: {str(e)}"}
 
 
 # Global MCP client instance
