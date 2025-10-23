@@ -95,9 +95,10 @@ async def whatsapp_webhook(
         # Get Claude's response with MCP tools
         logger.info("Calling Claude API with MCP tools...")
 
-        system_prompt = """You are a personal AI assistant communicating via WhatsApp.
+        system_prompt = f"""You are a personal AI assistant communicating via WhatsApp.
 
-The person messaging you is Saad, and you have access to his tools:
+The person messaging you from {From} is Saad (verified by phone number +447933993951).
+You have access to his tools and should help him manage his tasks:
 - List his tasks with todoist_get_tasks
 - Create new tasks with todoist_create_task
 - Complete tasks with todoist_complete_task
